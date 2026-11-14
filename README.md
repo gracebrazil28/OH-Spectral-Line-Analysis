@@ -35,11 +35,29 @@ This project processes a public raw-IQ recording of the 1665 MHz hydroxyl (OH) l
 
 ---
 
-## 2. Project layout
+## 2. Getting the IQ data
+
+**The IQ recordings are not included in this repository.** At 7.8 GB they are far too large for GitHub, so you need to download them yourself:
+
+1. Go to the Zenodo record: <https://zenodo.org/records/6711078>
+2. Download all four files (both `.sigmf-data` and both `.sigmf-meta`).
+3. In the project folder, create a folder named `iq_data` and move the four files into it.
+
+## 3. Project layout
+
+This repository contains only the script and this README:
 
 ```
 Hydroxyl-public-data/
-├── iq_data/
+├── oh_spectrum.py
+└── README.md
+```
+
+After you download the data and run the script, the folder should look like this:
+
+```
+Hydroxyl-public-data/
+├── iq_data/                 ← you create this and add the downloaded files
 │   ├── W3OH_1665MHz_2022-06-21T19_36_55_pol_x.sigmf-data
 │   ├── W3OH_1665MHz_2022-06-21T19_36_55_pol_x.sigmf-meta
 │   ├── W3OH_1665MHz_2022-06-21T19_36_55_pol_y.sigmf-data
@@ -53,7 +71,7 @@ Each `.sigmf-data` file must sit next to its `.sigmf-meta` file with the same ba
 
 ---
 
-## 3. Requirements
+## 4. Requirements
 
 - **Python** 3.8 or newer
 - **numpy**: array math and FFTs
@@ -78,9 +96,11 @@ pip install numpy scipy matplotlib astropy
 
 ---
 
-## 4. Running the script
+## 5. Running the script
 
-Run all commands from the project folder.
+Run all commands from the project folder. They assume you've downloaded the IQ files from [Zenodo](https://zenodo.org/records/6711078) into `iq_data\` as described in section 2. If you saved them somewhere else, replace `iq_data\` in each command with the path to your copy.
+
+The paths use Windows backslashes (`\`). On macOS or Linux, use forward slashes (`iq_data/...`).
 
 ### Inspect the metadata
 
@@ -143,7 +163,7 @@ This writes `SDRSharp_<date>_<time>Z_1665400000Hz_IQ.wav`. In SDR#, choose **Sou
 
 ---
 
-## 5. What you get
+## 6. What you get
 
 - **A PNG with three panels:**
   1. **Raw averaged spectrum (dB vs frequency offset).** Shows the receiver's bandpass shape, the DC spike at the center and any lines. The dashed line is the estimated baseline.
@@ -170,7 +190,7 @@ The frequency axis is then converted to velocity using the radio Doppler convent
 
 ---
 
-## 6. Results and interpretation
+## 7. Results and interpretation
 
 LSR correction at the time of the recording: **+14.9 km/s**. Topocentric velocity + 14.9 = LSR velocity.
 
@@ -214,7 +234,7 @@ LSR correction at the time of the recording: **+14.9 km/s**. Topocentric velocit
 
 ---
 
-## 7. Caveats and limitations
+## 8. Caveats and limitations
 
 - **No temperature calibration.** Panel 2 is a ratio, line power / system noise, not kelvins or janskys. To convert, multiply by the system noise expressed as a temperature (a standard way to quantify radio power). That value is not known here for this ATA antenna, so the plot stays as a ratio. Professional observatories get there with calibration against known hot and cold sources.
 - **Polarization from X vs Y alone is limited.** Linear feeds see circular polarization equally in X and Y. OH masers are often strongly circularly polarized, so measuring it requires cross-correlating X and Y and computing Stokes parameters. The X–Y phase offset is uncalibrated, which mixes some Stokes parameters.
@@ -225,7 +245,7 @@ LSR correction at the time of the recording: **+14.9 km/s**. Topocentric velocit
 
 ---
 
-## 8. Possible next steps
+## 9. Possible next steps
 
 - Per-row baseline normalization and an X+Y averaged waterfall.
 - A polarization mode: cross-correlate X and Y, then compute Stokes I, Q, U and V.
