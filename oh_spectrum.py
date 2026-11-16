@@ -25,6 +25,7 @@ Usage:
     python oh_spectrum.py info      X.sigmf-meta
     python oh_spectrum.py spectrum  X.sigmf-meta Y.sigmf-meta
     python oh_spectrum.py spectrum  X.sigmf-meta --seconds 60          (quick test)
+    python oh_spectrum.py stokes    X.sigmf-meta Y.sigmf-meta          (polarization)
     python oh_spectrum.py wav       X.sigmf-meta                        (WAV for SDR#)
 
 Run any subcommand with -h for all options.
@@ -219,10 +220,73 @@ def integrate(rec, nfft, seconds=None, skip=0.0, dump_seconds=10.0, ffts_per_chu
     dyn = np.fft.fftshift(dyn / dyn_count[:, None], axes=1)
     freqs_off = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / fs))
     dyn_t = skip + (np.arange(n_dumps) + 0.5) * ffts_per_dump * nfft / fs
+    # drop a short final row: averaging only a few FFTs makes it noisy and biased
+    keep = dyn_count >= 0.5 * ffts_per_dump
+    if keep.any():
+        dyn, dyn_t = dyn[keep], dyn_t[keep]
     used_s = total_ffts * nfft / fs
     print(f"  integrated {used_s:.1f} s, {total_ffts:,} FFTs, "
           f"resolution {fs / nfft:.1f} Hz/bin")
     return freqs_off, mean_spec, dyn, dyn_t, used_s
+
+
+def _read_fft_block(raw, rec, start_fft, k, nfft):
+    """Read k consecutive FFT-length blocks starting at FFT index start_fft -> complex64 [k, nfft]."""
+    a = start_fft * nfft * 2
+    chunk = np.asarray(raw[a: a + 2 * k * nfft], dtype=np.float32)
+    if rec["offset"]:
+        chunk -= rec["offset"]
+    return chunk.view(np.complex64).reshape(k, nfft)
+
+
+def integrate_pair(rx, ry, nfft, seconds=None, skip=0.0, ffts_per_chunk=64):
+    """
+    Read two simultaneously recorded channels (X and Y) in lockstep and average
+      XX  = |Fx|^2          (auto-power of X)
+      YY  = |Fy|^2          (auto-power of Y)
+      XY  = Fx * conj(Fy)   (cross-power: keeps the relative phase of X and Y)
+    The cross-power only averages to something non-zero for signals that are
+    present in BOTH channels with a stable phase relation, i.e. polarized emission.
+    """
+    fs = rx["fs"]
+    raw_x = np.memmap(rx["data_path"], dtype=rx["np_dtype"], mode="r", offset=rx["header_bytes"])
+    raw_y = np.memmap(ry["data_path"], dtype=ry["np_dtype"], mode="r", offset=ry["header_bytes"])
+    first_fft = int(skip * fs) // nfft
+    total_ffts = min(rx["n_samples"], ry["n_samples"]) // nfft - first_fft
+    if seconds:
+        total_ffts = min(total_ffts, int(seconds * fs) // nfft)
+    if total_ffts <= 0:
+        sys.exit("Nothing to process: check --seconds / --skip against the recording length.")
+
+    win = np.hanning(nfft).astype(np.float32)
+    xx = np.zeros(nfft)
+    yy = np.zeros(nfft)
+    xy = np.zeros(nfft, dtype=np.complex128)
+    t0 = time.time()
+    last_report = -1
+    done = 0
+    while done < total_ffts:
+        k = min(ffts_per_chunk, total_ffts - done)
+        fx = np.fft.fft(_read_fft_block(raw_x, rx, first_fft + done, k, nfft) * win, axis=1)
+        fy = np.fft.fft(_read_fft_block(raw_y, ry, first_fft + done, k, nfft) * win, axis=1)
+        xx += (fx.real ** 2 + fx.imag ** 2).sum(axis=0)
+        yy += (fy.real ** 2 + fy.imag ** 2).sum(axis=0)
+        xy += (fx * np.conj(fy)).sum(axis=0)
+        done += k
+        pct = int(100 * done / total_ffts)
+        if pct // 5 != last_report:
+            last_report = pct // 5
+            el = time.time() - t0
+            eta = el / done * (total_ffts - done)
+            print(f"\r  X x Y: {pct:3d}%  ({el:5.0f} s elapsed, ~{eta:4.0f} s left)",
+                  end="", flush=True)
+    print()
+    used_s = total_ffts * nfft / fs
+    print(f"  integrated {used_s:.1f} s, {total_ffts:,} FFT pairs, "
+          f"resolution {fs / nfft:.1f} Hz/bin")
+    sh = np.fft.fftshift
+    freqs_off = sh(np.fft.fftfreq(nfft, d=1.0 / fs))
+    return freqs_off, sh(xx / total_ffts), sh(yy / total_ffts), sh(xy / total_ffts), used_s
 
 
 # --------------------------------------------------------------------------
@@ -249,6 +313,35 @@ def running_median_baseline(spec, bad, window_bins):
     s[bad] = np.interp(np.flatnonzero(bad), np.flatnonzero(good), spec[good])
     window_bins = max(3, int(window_bins) | 1)          # odd size
     return median_filter(s, size=window_bins, mode="nearest")
+
+
+def normalize_rows(dyn, base, bad, mode, window_bins):
+    """
+    Turn each row of a dynamic spectrum into (S - baseline_row) / baseline_row.
+
+    mode "scale"  : baseline_row = (time-averaged bandpass) x (that row's median gain).
+                    Removes broadband gain jumps, which is what causes horizontal bands.
+    mode "median" : baseline_row = running median of the row itself.
+                    Also follows changes in bandpass SHAPE, but is much slower.
+    mode "none"   : baseline_row = time-averaged bandpass (the old behaviour).
+
+    Returns (normalized rows, relative gain of each row).
+    """
+    good = ~bad
+    ratio = dyn / base[None, :]
+    gains = np.median(ratio[:, good], axis=1)
+    if mode == "none":
+        norm = ratio - 1.0
+    elif mode == "scale":
+        norm = ratio / gains[:, None] - 1.0
+    elif mode == "median":
+        norm = np.empty_like(dyn)
+        for i, row in enumerate(dyn):
+            norm[i] = row / running_median_baseline(row, bad, window_bins) - 1.0
+    else:
+        sys.exit(f"Unknown --row-norm mode '{mode}'")
+    norm[:, bad] = np.nan
+    return norm, gains / np.median(gains)
 
 
 # --------------------------------------------------------------------------
@@ -284,6 +377,28 @@ def radio_velocity_kms(freq_hz, rest_hz):
     return C_KMS * (1.0 - freq_hz / rest_hz)
 
 
+def velocity_axis(rec, args, f_rf, used_s):
+    """Velocity for each channel, LSRK-corrected when possible. Returns (v, axis label)."""
+    v_topo = radio_velocity_kms(f_rf, args.rest)
+    mid_time = None
+    if rec["start"] is not None:
+        mid_time = rec["start"] + timedelta(seconds=args.skip + used_s / 2)
+    corr = None
+    if args.no_lsr:
+        print("LSR correction disabled (--no-lsr): velocities are topocentric.")
+    elif mid_time is None:
+        print("No start time in metadata (pass --start): velocities are topocentric.")
+    else:
+        corr = lsr_correction_kms(args.ra, args.dec, mid_time, args.site)
+        if corr is None:
+            print("astropy not installed: velocities are topocentric "
+                  "(conda install -c conda-forge astropy to enable LSR).")
+    if corr is not None:
+        print(f"LSRK correction at {mid_time.isoformat()} : {corr:+.3f} km/s")
+        return v_topo + corr, "LSRK velocity (km/s, radio)"
+    return v_topo, "Topocentric velocity (km/s, radio)"
+
+
 # --------------------------------------------------------------------------
 # 6. Spectrum command: process, plot, save
 # --------------------------------------------------------------------------
@@ -314,27 +429,7 @@ def cmd_spectrum(args):
 
     # frequency & velocity axes
     f_rf = fc + f_off
-    v_topo = radio_velocity_kms(f_rf, args.rest)
-    mid_time = None
-    if recs[0]["start"] is not None:
-        mid_time = recs[0]["start"] + timedelta(seconds=args.skip + results[0][4] / 2)
-    corr = None
-    if args.no_lsr:
-        print("LSR correction disabled (--no-lsr): velocities are topocentric.")
-    elif mid_time is None:
-        print("No start time in metadata (pass --start): velocities are topocentric.")
-    else:
-        corr = lsr_correction_kms(args.ra, args.dec, mid_time, args.site)
-        if corr is None:
-            print("astropy not installed: velocities are topocentric "
-                  "(conda install -c conda-forge astropy to enable LSR).")
-    if corr is not None:
-        print(f"LSRK correction at {mid_time.isoformat()} : {corr:+.3f} km/s")
-        v = v_topo + corr
-        vlabel = "LSRK velocity (km/s, radio)"
-    else:
-        v = v_topo
-        vlabel = "Topocentric velocity (km/s, radio)"
+    v, vlabel = velocity_axis(recs[0], args, f_rf, results[0][4])
 
     # baseline-normalize each polarization: (S - B) / B  = line / system power
     bad = bad_bin_mask(f_off, fs, args.edge, args.dc_mask)
@@ -358,8 +453,22 @@ def cmd_spectrum(args):
               f"({f_rf[i] / 1e6:.6f} MHz), peak {total[i]:.4f} of system power, "
               f"~{total[i] / noise:.0f} sigma")
 
+    # ---------- dynamic spectra: normalize each row by its own baseline ----------
+    dyn_norms, row_gains = [], []
+    for (r, spec, dyn, dyn_t, _), base in zip(results, baselines):
+        dn, g = normalize_rows(dyn, base, bad, args.row_norm, win_bins)
+        dyn_norms.append(dn)
+        row_gains.append(g)
+        dev = (g - 1) * 100
+        print(f"  {r['name']}: row gain varies {dev.min():+.2f}% to {dev.max():+.2f}% "
+              f"(largest at t = {dyn_t[np.argmax(np.abs(dev))]:.0f} s)")
+    n_rows = min(d.shape[0] for d in dyn_norms)
+    dyn_mean = np.mean([d[:n_rows] for d in dyn_norms], axis=0)
+    dyn_t0 = results[0][3][:n_rows]
+
     # ---------- plots ----------
-    fig, axes = plt.subplots(3, 1, figsize=(11, 12), constrained_layout=True)
+    fig, axes = plt.subplots(4, 1, figsize=(11, 15), constrained_layout=True,
+                             gridspec_kw={"height_ratios": [3, 3, 3, 1.4]})
     ax = axes[0]
     for (r, spec, *_), base in zip(results, baselines):
         ax.plot(f_off / 1e3, 10 * np.log10(spec), lw=0.6, label=f"{r['name']} raw")
@@ -389,11 +498,9 @@ def cmd_spectrum(args):
     ax.grid(alpha=0.3)
 
     ax = axes[2]
-    r0, spec0, dyn0, dyn_t0, _ = results[0]
-    dyn_norm = dyn0 / baselines[0][None, :] - 1.0
     cols = np.flatnonzero(sel) if sel.any() else np.flatnonzero(~bad)
     cols = cols[np.argsort(v[cols])]
-    img = dyn_norm[:, cols]
+    img = dyn_mean[:, cols]
     vmin_c, vmax_c = np.nanpercentile(img, [1, 99.5])
     ax.imshow(img, aspect="auto", origin="lower", cmap="viridis",
               vmin=vmin_c, vmax=vmax_c,
@@ -401,7 +508,23 @@ def cmd_spectrum(args):
                       dyn_t0[-1] + args.dump / 2])
     ax.set_xlabel(vlabel)
     ax.set_ylabel("Time from start (s)")
-    ax.set_title(f"3. Dynamic spectrum ({r0['name']}, {args.dump:g} s per row)")
+    who = "mean of " + " + ".join(r["name"].rsplit("_", 1)[-1] for r in recs) \
+        if len(recs) > 1 else recs[0]["name"]
+    norm_txt = {"scale": "each row rescaled to its own gain",
+                "median": "each row divided by its own running median",
+                "none": "single time-averaged baseline"}[args.row_norm]
+    ax.set_title(f"3. Dynamic spectrum ({who}; {args.dump:g} s rows; {norm_txt})")
+
+    ax = axes[3]
+    for (r, *_), g in zip(results, row_gains):
+        ax.plot(results[0][3][:len(g)], (g - 1) * 100, marker=".", lw=1, label=r["name"])
+    ax.axhline(0, color="k", lw=0.5)
+    ax.set_xlabel("Time from start (s)")
+    ax.set_ylabel("Gain change (%)")
+    ax.set_title(f"4. Broadband gain of each {args.dump:g} s row relative to the median "
+                 "(this is what per-row normalization removes)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
 
     out_base = args.out or recs[0]["name"] + "_spectrum"
     png = out_base + ".png"
@@ -424,6 +547,267 @@ def cmd_spectrum(args):
                 row += [f"{spec[i]:.6e}", "" if np.isnan(line[i]) else f"{line[i]:.6e}"]
             row.append("" if np.isnan(total[i]) else f"{total[i]:.6e}")
             w.writerow(row)
+    print(f"Saved data : {csv_path}")
+
+    if not args.no_show:
+        plt.show()
+
+
+# --------------------------------------------------------------------------
+# 7. Stokes command: polarization from the X-Y cross-correlation
+# --------------------------------------------------------------------------
+# For linear feeds X and Y, the four Stokes parameters come from the two
+# auto-powers and the cross-power:
+#     I = XX + YY            total intensity
+#     Q = XX - YY            linear polarization along X (+) or Y (-)
+#     U = 2 Re(X Y*)         linear polarization at +/-45 degrees
+#     V = 2 Im(X Y*)         circular polarization (sign is convention-dependent)
+# Each auto-power is divided by its own system-noise baseline (removing the
+# 2.8 dB X/Y gain difference) and the cross-power by sqrt(Bx * By), so every
+# Stokes parameter is in units of "fraction of one channel's system noise".
+#
+# Calibration caveat: the electronics behind X and Y add an unknown phase
+# offset phi to X Y*. That rotates (U, V) into (U cos phi - V sin phi, ...),
+# so without a calibrator U and V cannot be separated. Two things survive:
+#   * sqrt(U^2 + V^2) = 2 |X Y*|           (phi drops out of the magnitude)
+#   * phase DIFFERENCES between features   (phi is the same for all of them)
+# Q also needs no phase calibration, but assumes X and Y have equal system
+# temperatures.
+
+def robust_std(a):
+    a = np.asarray(a)
+    a = a[np.isfinite(a)]
+    return 1.4826 * np.median(np.abs(a - np.median(a)))
+
+
+def block_sum_sigma(arr, mask, n):
+    """
+    Noise of a sum over n adjacent channels, measured empirically from
+    line-free channels. This includes the correlation between neighbouring
+    channels (from the Hann window) that sigma * sqrt(n) would miss.
+    """
+    idx = np.flatnonzero(mask)
+    runs = np.split(idx, np.flatnonzero(np.diff(idx) != 1) + 1)
+    sums = [arr[run[: (len(run) // n) * n]].reshape(-1, n).sum(axis=1)
+            for run in runs if len(run) >= n]
+    sums = np.concatenate(sums) if sums else np.array([])
+    if sums.size < 20:                       # not enough line-free data: fall back
+        return robust_std(arr[mask]) * np.sqrt(n)
+    return robust_std(sums)
+
+
+def cmd_stokes(args):
+    import matplotlib
+    if args.no_show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from scipy.signal import find_peaks
+
+    rx = load_recording(args.xfile, args.center, args.rate, args.start)
+    ry = load_recording(args.yfile, args.center, args.rate, args.start)
+    for r in (rx, ry):
+        describe(r)
+        print()
+    if rx["fs"] != ry["fs"] or rx["fc"] != ry["fc"]:
+        sys.exit("X and Y must have the same sample rate and center frequency.")
+    if rx["data_path"] == ry["data_path"]:
+        sys.exit("X and Y are the same file. Pass the pol_x file first, then pol_y.")
+    if rx["start"] and ry["start"]:
+        dt = abs((rx["start"] - ry["start"]).total_seconds())
+        if dt > 1e-3:
+            print(f"WARNING: X and Y start times differ by {dt:.6f} s. The cross-correlation "
+                  "assumes the files are sample-aligned; an offset will weaken it.")
+    if rx["n_samples"] != ry["n_samples"]:
+        print(f"Note: X has {rx['n_samples']:,} samples and Y has {ry['n_samples']:,}; "
+              "using the shorter length.")
+
+    fs, fc, nfft = rx["fs"], rx["fc"], args.nfft
+    print(f"FFT size {nfft} -> {fs / nfft:.1f} Hz per bin")
+    f_off, XX, YY, XY, used_s = integrate_pair(rx, ry, nfft, args.seconds, args.skip)
+    f_rf = fc + f_off
+    v, vlabel = velocity_axis(rx, args, f_rf, used_s)
+
+    # ---- baselines and normalization ----
+    bad = bad_bin_mask(f_off, fs, args.edge, args.dc_mask)
+    good = ~bad
+    win_bins = args.baseline_khz * 1e3 / (fs / nfft)
+    Bx = running_median_baseline(XX, bad, win_bins)
+    By = running_median_baseline(YY, bad, win_bins)
+    # Off the line, X Y* should average to ~0. Anything left is correlated
+    # receiver noise or crosstalk; remove it like a bandpass.
+    Bxy = (running_median_baseline(XY.real, bad, win_bins)
+           + 1j * running_median_baseline(XY.imag, bad, win_bins))
+    norm = np.sqrt(Bx * By)
+
+    x = XX / Bx - 1.0
+    y = YY / By - 1.0
+    c = (XY - Bxy) / norm
+    calibrated = args.xy_phase is not None
+    if calibrated:
+        c = c * np.exp(-1j * np.radians(args.xy_phase))
+
+    I, Q = x + y, x - y
+    U, V = 2 * c.real, 2 * c.imag
+    P = 2 * np.abs(c)                        # sqrt(U^2 + V^2), independent of the phase offset
+    for a in (I, Q, U, V, P):
+        a[bad] = np.nan
+    c[bad] = np.nan
+
+    floor = np.abs(np.median(Bxy[good].real) + 1j * np.median(Bxy[good].imag)) / np.median(norm[good])
+    print(f"Correlated X-Y noise off the line (removed as a baseline): {floor:.4f} of system power")
+
+    win = good & (v >= args.vmin) & (v <= args.vmax)
+    off = good & ~((v >= args.vmin) & (v <= args.vmax))
+    sI, sQ, sU, sV = (robust_std(a[off]) for a in (I, Q, U, V))
+    sP = 0.5 * (sU + sV)
+    print(f"Per-channel noise off the line: I {sI:.4f}, Q {sQ:.4f}, U' {sU:.4f}, V' {sV:.4f}")
+
+    # ---- find features ----
+    chan_kms = abs(v[1] - v[0])
+    if args.features:
+        centers = sorted(args.features)
+    else:
+        sm = np.convolve(np.nan_to_num(I), np.ones(5) / 5, mode="same")
+        s_sm = robust_std(sm[off])
+        dist = max(1, int(round(2 * args.halfwidth / chan_kms)))
+        pk, _ = find_peaks(np.where(win, sm, 0.0), height=args.min_snr * s_sm, distance=dist)
+        centers = sorted(v[pk])
+        print(f"Automatic peak finding (> {args.min_snr:g} sigma, 5-channel smoothing): "
+              f"{len(centers)} feature(s)")
+
+    # ---- measure each feature ----
+    feats = []
+    for vc in centers:
+        m = good & (np.abs(v - vc) <= args.halfwidth)
+        n = int(m.sum())
+        if n == 0:
+            continue
+        Is, Qs = np.nansum(I[m]), np.nansum(Q[m])
+        cs = np.nansum(c[m])
+        Us, Vs, Ps = 2 * cs.real, 2 * cs.imag, 2 * abs(cs)
+        eI = block_sum_sigma(I, off, n)
+        eQ = block_sum_sigma(Q, off, n)
+        eU = block_sum_sigma(U, off, n)
+        eV = block_sum_sigma(V, off, n)
+        eP = 0.5 * (eU + eV)
+        P_deb = np.sqrt(max(Ps ** 2 - eP ** 2, 0.0))   # remove the positive noise bias of |.|
+
+        def frac(num, enum):
+            """num / I with an error that includes the noise in I as well."""
+            r = num / Is
+            return r, np.sqrt(enum ** 2 + (r * eI) ** 2) / abs(Is)
+
+        q, eq = frac(Qs, eQ)
+        u, eu = frac(Us, eU)
+        vv, ev = frac(Vs, eV)
+        p, ep = frac(P_deb, eP)
+        feats.append(dict(
+            v=vc, n=n, snr=Is / eI,
+            q=q, eq=eq, u=u, eu=eu, vv=vv, ev=ev,
+            p=p, ep=ep, p_snr=Ps / eP,
+            phase=np.degrees(np.angle(cs)),
+            ephase=np.degrees(eP / Ps) if Ps > 0 else np.nan,
+        ))
+
+    # ---- report ----
+    up = "U " if calibrated else "U'"
+    vp = "V " if calibrated else "V'"
+    print()
+    print(f"Feature measurements (window +/- {args.halfwidth:g} km/s; fractions of Stokes I):")
+    hdr = (f"{'v (km/s)':>9} {'I S/N':>6} | {'q = Q/I':>14} | "
+           f"{'sqrt(U2+V2)/I':>14} | {'X-Y phase':>13}")
+    if calibrated:
+        hdr += f" | {'u = U/I':>14} | {'v = V/I':>14}"
+    print(hdr)
+    print("-" * len(hdr))
+    for f in feats:
+        line = (f"{f['v']:>9.2f} {f['snr']:>6.0f} | {f['q']:+.3f} +/- {f['eq']:.3f} | "
+                f"{f['p']:.3f} +/- {f['ep']:.3f} | ")
+        line += (f"{f['phase']:+6.0f} +/- {f['ephase']:3.0f}" if f["p_snr"] > 3
+                 else f"{'(not detected)':>13}")
+        if calibrated:
+            line += f" | {f['u']:+.3f} +/- {f['eu']:.3f} | {f['vv']:+.3f} +/- {f['ev']:.3f}"
+        print(line)
+    print()
+    print("How to read this:")
+    print("  q            : X vs Y difference. Non-zero at > 3 sigma -> linear polarization along X or Y")
+    print("                 (assumes equal system temperatures in X and Y).")
+    print("  sqrt(U2+V2)/I: polarized signal that is correlated between X and Y: linear at +/-45 deg")
+    print("                 and/or circular. Not affected by the unknown X-Y phase.")
+    if not calibrated:
+        print("  X-Y phase    : includes an unknown instrumental offset, so only DIFFERENCES between")
+        print("                 features mean something. Features ~180 deg apart have opposite-sign")
+        print("                 U or V; for OH masers, opposite circular polarization is the signature")
+        print("                 of a Zeeman pair.")
+
+    # ---- plots ----
+    fig, axes = plt.subplots(3, 1, figsize=(11, 12), constrained_layout=True, sharex=True)
+    order = np.argsort(v)
+    vo = v[order]
+
+    def shade(ax):
+        for f in feats:
+            ax.axvspan(f["v"] - args.halfwidth, f["v"] + args.halfwidth, color="0.85", zorder=0)
+
+    ax = axes[0]
+    shade(ax)
+    ax.plot(vo, I[order], color="k", lw=1.0, label="I = X + Y")
+    ax.plot(vo, Q[order], color="tab:red", lw=0.8, label="Q = X - Y")
+    ax.axhline(0, color="0.5", lw=0.5)
+    ax.set_ylabel("fraction of system noise")
+    ax.set_title("1. Total intensity I and linear polarization Q (X vs Y)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+    ax = axes[1]
+    shade(ax)
+    ax.plot(vo, U[order], color="tab:blue", lw=0.8,
+            label="U = 2 Re(XY*)" if calibrated else "U' = 2 Re(XY*)  (mixed with V)")
+    ax.plot(vo, V[order], color="tab:green", lw=0.8,
+            label="V = 2 Im(XY*)" if calibrated else "V' = 2 Im(XY*)  (mixed with U)")
+    ax.plot(vo, P[order], color="k", lw=1.0, label="2|XY*| = sqrt(U² + V²)")
+    ax.axhline(0, color="0.5", lw=0.5)
+    ax.set_ylabel("fraction of system noise")
+    ax.set_title("2. Cross-correlation of X and Y: polarized emission common to both feeds")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+    ax = axes[2]
+    shade(ax)
+    det = (P > 4 * sP) & np.isfinite(P)
+    ax.scatter(v[det], np.degrees(np.angle(c[det])), s=8, c="tab:purple",
+               label=f"channels with 2|XY*| > 4 sigma")
+    for f in feats:
+        if f["p_snr"] > 3:
+            ax.errorbar(f["v"], f["phase"], yerr=f["ephase"], fmt="o", color="k", ms=6)
+    ax.set_ylim(-190, 190)
+    ax.set_yticks(range(-180, 181, 90))
+    ax.set_ylabel("phase of XY* (deg)")
+    ax.set_xlabel(vlabel)
+    ax.set_title("3. X-Y phase" + ("" if calibrated else
+                 " (includes unknown instrumental offset; compare features, not absolute values)"))
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    ax.set_xlim(args.vmin, args.vmax)
+
+    fig.suptitle(f"Polarization: {rx['name']} x {ry['name']} | {used_s:.0f} s | "
+                 f"{fs / nfft:.0f} Hz/bin | X-Y phase "
+                 + (f"calibrated ({args.xy_phase:+g} deg)" if calibrated else "NOT calibrated"),
+                 fontsize=10)
+    out_base = args.out or rx["name"] + "_stokes"
+    png = out_base + ".png"
+    fig.savefig(png, dpi=130)
+    print(f"\nSaved plot : {png}")
+
+    csv_path = out_base + ".csv"
+    with open(csv_path, "w", newline="") as fcsv:
+        w = csv.writer(fcsv)
+        w.writerow(["freq_hz", "velocity_kms", "I", "Q", "U" if calibrated else "U_prime",
+                    "V" if calibrated else "V_prime", "sqrt_U2_V2"])
+        for i in range(nfft):
+            vals = [I[i], Q[i], U[i], V[i], P[i]]
+            w.writerow([f"{f_rf[i]:.3f}", f"{v[i]:.4f}"]
+                       + ["" if np.isnan(a) else f"{a:.6e}" for a in vals])
     print(f"Saved data : {csv_path}")
 
     if not args.no_show:
@@ -500,35 +884,63 @@ def main():
     common(sp)
     sp.set_defaults(func=cmd_info)
 
+    def analysis(sp, vmin, vmax):
+        """Options shared by 'spectrum' and 'stokes'."""
+        common(sp)
+        sp.add_argument("--nfft", type=int, default=16384,
+                        help="FFT size; resolution = sample rate / nfft (default 16384 -> ~117 Hz)")
+        sp.add_argument("--seconds", type=float, help="only process this many seconds")
+        sp.add_argument("--skip", type=float, default=0.0,
+                        help="skip this many seconds at the start")
+        sp.add_argument("--rest", type=float, default=DEFAULT_REST_HZ,
+                        help="rest frequency in Hz (default OH 1665.4018e6; HI is 1420.405751768e6)")
+        sp.add_argument("--ra", default=DEFAULT_RA, help="target RA, J2000 (default W3(OH))")
+        sp.add_argument("--dec", default=DEFAULT_DEC, help="target Dec, J2000 (default W3(OH))")
+        sp.add_argument("--site", type=float, nargs=3, default=DEFAULT_SITE,
+                        metavar=("LAT", "LON", "HEIGHT_M"),
+                        help="observatory location (default Allen Telescope Array)")
+        sp.add_argument("--no-lsr", action="store_true",
+                        help="skip the LSR velocity correction")
+        sp.add_argument("--vmin", type=float, default=vmin,
+                        help=f"velocity plot window, km/s (default {vmin:g})")
+        sp.add_argument("--vmax", type=float, default=vmax,
+                        help=f"velocity plot window, km/s (default {vmax:g})")
+        sp.add_argument("--baseline-khz", type=float, default=300.0,
+                        help="running-median width for the baseline, kHz (default 300; "
+                             "must be much wider than the line)")
+        sp.add_argument("--edge", type=float, default=0.06,
+                        help="fraction of each band edge to ignore (default 0.06)")
+        sp.add_argument("--dc-mask", type=float, default=1500.0,
+                        help="ignore +/- this many Hz around the DC spike (default 1500)")
+        sp.add_argument("--out", help="output file name prefix")
+        sp.add_argument("--no-show", action="store_true",
+                        help="save files without opening a window")
+
     sp = sub.add_parser("spectrum", help="average, baseline-correct, plot")
     sp.add_argument("files", nargs="+", help="one .sigmf-meta (or -data) per polarization")
-    common(sp)
-    sp.add_argument("--nfft", type=int, default=16384,
-                    help="FFT size; resolution = sample rate / nfft (default 16384 -> ~117 Hz)")
-    sp.add_argument("--seconds", type=float, help="only process this many seconds")
-    sp.add_argument("--skip", type=float, default=0.0, help="skip this many seconds at the start")
+    analysis(sp, -100.0, 10.0)
     sp.add_argument("--dump", type=float, default=10.0,
                     help="seconds per row of the dynamic spectrum (default 10)")
-    sp.add_argument("--rest", type=float, default=DEFAULT_REST_HZ,
-                    help="rest frequency in Hz (default OH 1665.4018e6; HI is 1420.405751768e6)")
-    sp.add_argument("--ra", default=DEFAULT_RA, help="target RA, J2000 (default W3(OH))")
-    sp.add_argument("--dec", default=DEFAULT_DEC, help="target Dec, J2000 (default W3(OH))")
-    sp.add_argument("--site", type=float, nargs=3, default=DEFAULT_SITE,
-                    metavar=("LAT", "LON", "HEIGHT_M"),
-                    help="observatory location (default Allen Telescope Array)")
-    sp.add_argument("--no-lsr", action="store_true", help="skip the LSR velocity correction")
-    sp.add_argument("--vmin", type=float, default=-100.0, help="velocity plot window (km/s)")
-    sp.add_argument("--vmax", type=float, default=10.0, help="velocity plot window (km/s)")
-    sp.add_argument("--baseline-khz", type=float, default=300.0,
-                    help="running-median width for the baseline, kHz (default 300; "
-                         "must be much wider than the line)")
-    sp.add_argument("--edge", type=float, default=0.06,
-                    help="fraction of each band edge to ignore (default 0.06)")
-    sp.add_argument("--dc-mask", type=float, default=1500.0,
-                    help="ignore +/- this many Hz around the DC spike (default 1500)")
-    sp.add_argument("--out", help="output file name prefix")
-    sp.add_argument("--no-show", action="store_true", help="save files without opening a window")
+    sp.add_argument("--row-norm", choices=["scale", "median", "none"], default="scale",
+                    help="dynamic-spectrum row normalization: 'scale' (default) removes "
+                         "broadband gain jumps; 'median' fits each row's own baseline "
+                         "(slower); 'none' = old behaviour")
     sp.set_defaults(func=cmd_spectrum)
+
+    sp = sub.add_parser("stokes", help="cross-correlate X and Y: Stokes I, Q, U, V per feature")
+    sp.add_argument("xfile", help="X polarization .sigmf-meta (or -data)")
+    sp.add_argument("yfile", help="Y polarization .sigmf-meta (or -data)")
+    analysis(sp, -50.0, -40.0)
+    sp.add_argument("--xy-phase", type=float, default=None, metavar="DEG",
+                    help="instrumental phase that the receiver adds to XY*, in degrees; it is "
+                         "subtracted. Unknown for this dataset; without it U and V are mixed")
+    sp.add_argument("--features", type=float, nargs="+", metavar="V",
+                    help="feature velocities to measure (km/s). Default: find peaks automatically")
+    sp.add_argument("--halfwidth", type=float, default=0.15,
+                    help="half-width of each feature's velocity window, km/s (default 0.15)")
+    sp.add_argument("--min-snr", type=float, default=6.0,
+                    help="automatic peak finding threshold in sigma (default 6)")
+    sp.set_defaults(func=cmd_stokes)
 
     sp = sub.add_parser("wav", help="convert to a WAV file SDR# can play")
     sp.add_argument("file")
