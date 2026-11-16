@@ -1,0 +1,161 @@
+Normalized Spectrum Result (Actual Data):
+Command used: python oh_spectrum.py spectrum [file path for pol_x.sigmf-meta] [file path for pol_y.sigmf-meta] --vmin -50 --vmax -40 --out xy_rows
+File          : iq_data\W3OH_1665MHz_2022-06-21T19_36_55_pol_x.sigmf-data
+Datatype      : ci16_le
+Sample rate   : 1,920,000 samples/s
+Center freq   : 1665.400000 MHz
+Coverage      : 1664.4400 to 1666.3600 MHz
+Start time    : 2022-06-21T19:36:55.161439+00:00
+Samples       : 971,942,220  (506.2 s)
+
+File          : iq_data\W3OH_1665MHz_2022-06-21T19_36_55_pol_y.sigmf-data
+Datatype      : ci16_le
+Sample rate   : 1,920,000 samples/s
+Center freq   : 1665.400000 MHz
+Coverage      : 1664.4400 to 1666.3600 MHz
+Start time    : 2022-06-21T19:36:55.161439+00:00
+Samples       : 971,942,220  (506.2 s)
+
+FFT size 16384 -> 117.2 Hz per bin (21.1 m/s per bin at the rest frequency)
+  W3OH_1665MHz_2022-06-21T19_36_55_pol_x: 100%  (   89 s elapsed, ~   0 s left)
+  integrated 506.2 s, 59,322 FFTs, resolution 117.2 Hz/bin
+  W3OH_1665MHz_2022-06-21T19_36_55_pol_y: 100%  (  153 s elapsed, ~   0 s left)
+  integrated 506.2 s, 59,322 FFTs, resolution 117.2 Hz/bin
+LSRK correction at 2022-06-21T19:41:08.268639+00:00 : +14.943 km/s
+Strongest feature in window: -45.17 km/s  (1665.735742 MHz), peak 0.0488 of system power, ~16 sigma
+  W3OH_1665MHz_2022-06-21T19_36_55_pol_x: row gain varies -2.51% to +6.12% (largest at t = 385 s)
+  W3OH_1665MHz_2022-06-21T19_36_55_pol_y: row gain varies -0.58% to +0.95% (largest at t = 15 s)
+Saved plot : xy_rows.png
+Saved data : xy_rows.csv
+
+
+Normalized Stokes Result (Actual Data):
+Command used: python oh_spectrum.py stokes [file path for pol_x.sigmf-meta] [file path for pol_y.sigmf-meta] --out w3oh_stokes
+
+File          : iq_data\W3OH_1665MHz_2022-06-21T19_36_55_pol_x.sigmf-data
+Datatype      : ci16_le
+Sample rate   : 1,920,000 samples/s
+Center freq   : 1665.400000 MHz
+Coverage      : 1664.4400 to 1666.3600 MHz
+Start time    : 2022-06-21T19:36:55.161439+00:00
+Samples       : 971,942,220  (506.2 s)
+
+File          : iq_data\W3OH_1665MHz_2022-06-21T19_36_55_pol_y.sigmf-data
+Datatype      : ci16_le
+Sample rate   : 1,920,000 samples/s
+Center freq   : 1665.400000 MHz
+Coverage      : 1664.4400 to 1666.3600 MHz
+Start time    : 2022-06-21T19:36:55.161439+00:00
+Samples       : 971,942,220  (506.2 s)
+
+FFT size 16384 -> 117.2 Hz per bin
+  X x Y: 100%  (  260 s elapsed, ~   0 s left)
+  integrated 506.2 s, 59,322 FFT pairs, resolution 117.2 Hz/bin
+LSRK correction at 2022-06-21T19:41:08.268639+00:00 : +14.943 km/s
+Correlated X-Y noise off the line (removed as a baseline): 0.0525 of system power
+Per-channel noise off the line: I 0.0059, Q 0.0059, U' 0.0060, V' 0.0060
+Automatic peak finding (> 6 sigma, 5-channel smoothing): 2 feature(s)
+
+Feature measurements (window +/- 0.15 km/s; fractions of Stokes I):
+ v (km/s)  I S/N |        q = Q/I |  sqrt(U2+V2)/I |     X-Y phase
+------------------------------------------------------------------
+   -46.18     19 | +0.062 +/- 0.049 | 1.150 +/- 0.082 |   -172 +/-   3
+   -45.19     39 | -0.184 +/- 0.024 | 0.196 +/- 0.027 |    -75 +/-   8
+
+How to read this:
+  q            : X vs Y difference. Non-zero at > 3 sigma -> linear polarization along X or Y
+                 (assumes equal system temperatures in X and Y).
+  sqrt(U2+V2)/I: polarized signal that is correlated between X and Y: linear at +/-45 deg
+                 and/or circular. Not affected by the unknown X-Y phase.
+  X-Y phase    : includes an unknown instrumental offset, so only DIFFERENCES between
+                 features mean something. Features ~180 deg apart have opposite-sign
+                 U or V; for OH masers, opposite circular polarization is the signature
+                 of a Zeeman pair.
+
+Saved plot : w3oh_stokes.png
+Saved data : w3oh_stokes.csv
+
+VALIDATION
+First, run to make synthetic data:
+Command used: python make_synthetic_test.py --out-dir [path for output directory]
+
+   30.0 / 30 s
+Wrote synth\PX.sigmf-data and synth\PY.sigmf-data (230 MB each) plus .sigmf-meta files
+Injected features (topocentric radio velocity):
+  A  +240 kHz   -42.88 km/s  linear along X
+  E  +245 kHz   -43.78 km/s  linear at +45 deg
+  B  +250 kHz   -44.68 km/s  circular (V < 0)
+  C  +255 kHz   -45.58 km/s  circular (V > 0)
+  D  +260 kHz   -46.48 km/s  unpolarized
+
+Second, test synthetic data with Normalized Spectrum
+Normalized Spectrum Result (Synthetic Data):
+Command used:  python ..\oh_spectrum.py spectrum [file path for PY.sigmf-meta] --no-lsr --vmin -48 --vmax -41 --dump 2
+
+File          : synth/PX.sigmf-data
+Datatype      : ci16_le
+Sample rate   : 1,920,000 samples/s
+Center freq   : 1665.400000 MHz
+Coverage      : 1664.4400 to 1666.3600 MHz
+Start time    : 2022-06-21T19:36:55+00:00
+Samples       : 57,600,000  (30.0 s)
+
+File          : synth/PY.sigmf-data
+Datatype      : ci16_le
+Sample rate   : 1,920,000 samples/s
+Center freq   : 1665.400000 MHz
+Coverage      : 1664.4400 to 1666.3600 MHz
+Start time    : 2022-06-21T19:36:55+00:00
+Samples       : 57,600,000  (30.0 s)
+
+FFT size 16384 -> 117.2 Hz per bin (21.1 m/s per bin at the rest frequency)
+  PX: 100%  (    8 s elapsed, ~   0 s left)
+  integrated 30.0 s, 3,515 FFTs, resolution 117.2 Hz/bin
+  PY: 100%  (    8 s elapsed, ~   0 s left)
+  integrated 30.0 s, 3,515 FFTs, resolution 117.2 Hz/bin
+LSR correction disabled (--no-lsr): velocities are topocentric.
+Strongest feature in window: -46.49 km/s  (1665.660039 MHz), peak 0.3313 of system power, ~29 sigma
+  PX: row gain varies -0.27% to +6.06% (largest at t = 11 s)
+  PY: row gain varies -0.10% to +0.14% (largest at t = 11 s)
+Saved plot : PX_spectrum.png
+Saved data : PX_spectrum.csv
+
+
+Normalized Stokes Result (Actual Data):
+Command used: python ..\oh_spectrum.py stokes[file path for PY.sigmf-meta] --no-lsr --vmin -48 --vmax -41
+
+Sample rate   : 1,920,000 samples/s
+Center freq   : 1665.400000 MHz
+Coverage      : 1664.4400 to 1666.3600 MHz
+Start time    : 2022-06-21T19:36:55+00:00
+Samples       : 57,600,000  (30.0 s)
+
+FFT size 16384 -> 117.2 Hz per bin
+  X x Y: 100%  (   17 s elapsed, ~   0 s left)
+  integrated 30.0 s, 3,515 FFT pairs, resolution 117.2 Hz/bin
+LSR correction disabled (--no-lsr): velocities are topocentric.
+Correlated X-Y noise off the line (removed as a baseline): 0.0001 of system power
+Per-channel noise off the line: I 0.0230, Q 0.0222, U' 0.0237, V' 0.0241
+Automatic peak finding (> 6 sigma, 5-channel smoothing): 5 feature(s)
+
+Feature measurements (window +/- 0.15 km/s; fractions of Stokes I):
+ v (km/s)  I S/N |        q = Q/I |  sqrt(U2+V2)/I |     X-Y phase
+------------------------------------------------------------------
+   -46.49     52 | +0.004 +/- 0.016 | 0.021 +/- 0.020 | (not detected)
+   -45.58     28 | -0.003 +/- 0.030 | 0.976 +/- 0.051 |    +49 +/-   2
+   -44.67     25 | +0.043 +/- 0.034 | 1.129 +/- 0.062 |   -132 +/-   2
+   -43.81     27 | +0.041 +/- 0.031 | 0.974 +/- 0.053 |    -36 +/-   2
+   -42.88     26 | +0.972 +/- 0.050 | 0.020 +/- 0.041 | (not detected)
+
+How to read this:
+  q            : X vs Y difference. Non-zero at > 3 sigma -> linear polarization along X or Y
+                 (assumes equal system temperatures in X and Y).
+  sqrt(U2+V2)/I: polarized signal that is correlated between X and Y: linear at +/-45 deg
+                 and/or circular. Not affected by the unknown X-Y phase.
+  X-Y phase    : includes an unknown instrumental offset, so only DIFFERENCES between
+                 features mean something. Features ~180 deg apart have opposite-sign
+                 U or V; for OH masers, opposite circular polarization is the signature
+                 of a Zeeman pair.
+
+Saved plot : PX_stokes.png
+Saved data : PX_stokes.csv
