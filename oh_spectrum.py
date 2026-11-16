@@ -596,12 +596,25 @@ def block_sum_sigma(arr, mask, n):
     return robust_std(sums)
 
 
+def find_peaks_simple(a, height, distance):
+    """
+    Indices of local maxima above `height`, at least `distance` channels apart
+    (strongest kept first). Plain-numpy stand-in for scipy.signal.find_peaks.
+    """
+    a = np.asarray(a, dtype=float)
+    cand = np.flatnonzero((a[1:-1] > a[:-2]) & (a[1:-1] >= a[2:]) & (a[1:-1] > height)) + 1
+    chosen = []
+    for i in cand[np.argsort(a[cand])[::-1]]:
+        if all(abs(i - j) >= distance for j in chosen):
+            chosen.append(i)
+    return np.array(sorted(chosen), dtype=int)
+
+
 def cmd_stokes(args):
     import matplotlib
     if args.no_show:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from scipy.signal import find_peaks
 
     rx = load_recording(args.xfile, args.center, args.rate, args.start)
     ry = load_recording(args.yfile, args.center, args.rate, args.start)
@@ -670,7 +683,7 @@ def cmd_stokes(args):
         sm = np.convolve(np.nan_to_num(I), np.ones(5) / 5, mode="same")
         s_sm = robust_std(sm[off])
         dist = max(1, int(round(2 * args.halfwidth / chan_kms)))
-        pk, _ = find_peaks(np.where(win, sm, 0.0), height=args.min_snr * s_sm, distance=dist)
+        pk = find_peaks_simple(np.where(win, sm, 0.0), args.min_snr * s_sm, dist)
         centers = sorted(v[pk])
         print(f"Automatic peak finding (> {args.min_snr:g} sigma, 5-channel smoothing): "
               f"{len(centers)} feature(s)")
