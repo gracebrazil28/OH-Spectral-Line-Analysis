@@ -159,3 +159,35 @@ How to read this:
 
 Saved plot : PX_stokes.png
 Saved data : PX_stokes.csv
+
+The Fit Command Results:
+Fitting the averaged X+Y line profile as a sum of Gaussian peaks
+Command used: python ..\oh_spectrum.py fit xy_rows.csv --integration 506.2
+
+Profile column : mean_line  (2 polarizations averaged)
+Channel width  : 117.2 Hz
+Noise (measured, line-free channels): 0.00270 per channel
+Noise (radiometer equation, 506.2 s x 2 pol): 0.00290  -> measured / predicted = 0.93
+
+Fitting -48 to -42.5 km/s ...
+ components  reduced chi2       BIC
+          4          1.06     331.2
+          5          0.98     325.3  <- chosen (lowest BIC)
+
+Components (uncertainties assume independent channels; the Hann window makes neighbouring channels correlated, so treat them as lower limits):
+         v (km/s)              peak       FWHM (km/s)  area (km/s)
+  -46.220 +/- 0.008    0.0209 +/- 0.0011     0.313 +/- 0.022      0.00696
+  -45.300 +/- 0.082    0.0080 +/- 0.0013     1.672 +/- 0.220      0.01428  (broad)
+  -45.197 +/- 0.006    0.0376 +/- 0.0014     0.481 +/- 0.020      0.01925
+  -44.130 +/- 0.021    0.0079 +/- 0.0011     0.345 +/- 0.060      0.00289
+  -42.681 +/- 0.018    0.0056 +/- 0.0015     0.145 +/- 0.043      0.00087
+
+Thermal FWHM for a molecule of 17 amu (lines narrower than this point to maser amplification):
+  50 K: 0.37 km/s, 100 K: 0.52 km/s, 150 K: 0.64 km/s
+
+Saved table: xy_rows_fit.csv
+Saved plot : xy_rows_fit.png
+
+Kinematic distance for -45.20 km/s at l = 133.95, b = 1.06 deg (flat curve, R0 8.15 kpc, Theta0 236 km/s): 3.77 kpc
+At the parallax distance 1.95 kpc, circular rotation predicts -25.8 km/s -> non-circular motion +19.4 km/s
+Saved plot : xy_rows_fit_kinematic.png
